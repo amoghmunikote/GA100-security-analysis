@@ -1,4 +1,4 @@
-# Firmware Parsing Vulnerabilities - Detailed Analysis
+# 2.3 — Firmware Parsing Vulnerabilities
 
 ## Overview
 
@@ -96,12 +96,14 @@ class MaliciousFirmwareImage:
 
 ## Vulnerability 2: Dependency Map Array Bounds Violation
 
-### Severity: CRITICAL
+### Severity: ~~CRITICAL~~ **DOWNGRADED — NOT PRESENT IN GA100 PROD**
+
+> **CORRECTION (Phase-3)**: `_acrlibCheckDependency_v2()` is the **GA10X v2-blob code path**. GA100 production binaries use **v1 blobs** and this function is absent from the prod-signed AHESASC binary. Anti-rollback on GA100 is enforced via the FPF fuse register `NV_FUSE_OPT_FPF_UCODE_ACR_HS_REV` at `0x824250`, not via depMap iteration. The OOB array access vulnerability does NOT apply to GA100 prod builds. See `7-2-phase3-binary-analysis.md` for binary confirmation.
 
 ### Location
-**File**: `uproc/acr/src/acrshared/ampere/acr_wpr_ctrl_ga10x.c`  
+**File**: `uproc/acr/src/acrshared/ampere/acr_wpr_ctrl_ga10x.c` (GA10X+ path only)  
 **Function**: `_acrlibCheckDependency_v2()`  
-**Data Structure**: Dependency map in LSF descriptor
+**Data Structure**: Dependency map in LSF descriptor v2 blob (not used on GA100)
 
 ### Root Cause
 
@@ -196,36 +198,29 @@ class MaliciousDepMap:
 
 ### Location
 **File**: `uproc/acr/src/ahesasc/ampere/acr_decrypt_ls_ucode_ga100.c`  
-**Function**: AES-CBC decryption routine
+**Function**: ~~AES-CBC decryption routine~~
 
-### Root Cause
+> **CORRECTION (/4 binary analysis — see `6-1-crypto-auth-chain-map.md` §5, `6-2-verification-state-machine.md` §3.7):**  
+> **GA100 does not use AES-CBC for LS firmware authentication.** The file `acr_decrypt_ls_ucode_ga100.c` exists but the GA100 production AHESASC binary uses the TU10X code path: AES-DM (Davies-Meyer) hash + AES-ECB KDF via SCP hardware slot 43. The AES-CBC path (`acr_decrypt_ls_ucode_ga10x.c`) is GA10X+ only and is confirmed absent from the GA100 prod AHESASC binary. The three hypotheses below and the code pattern are ## speculation; the actual mechanism is fully resolved.
 
-Encrypted firmware images use AES-CBC encryption, but the source and derivation of encryption keys are not documented in the source code. This raises the possibility that:
+### Root Cause (RESOLVED)
 
-1. Keys are hardcoded (same for all GA100s)
-2. Keys are derived from a GPU-unique identifier
-3. Keys are stored in read-protected WPR (inaccessible)
+~~Encrypted firmware images use AES-CBC encryption~~ **LS authentication uses AES-DM + KDF + SCP slot 43**, the source and derivation of which are now fully documented:
 
-### Code Pattern
+1. ~~Keys are hardcoded (same for all GA100s)~~ — **WRONG.** Key is KDF-derived per falcon, but root is SCP slot 43.
+2. ~~Keys are derived from a GPU-unique identifier~~ — **WRONG.** SCP slot 43 is the same across all GA100 dies (manufacturing-time secret, not per-GPU).
+3. ~~Keys are stored in read-protected WPR~~ — **WRONG.** Root key is in SCP hardware (inaccessible from software); the per-falcon derived key is ephemeral in SCP registers during verification only.
 
-```c
-// Simplified from acr_decrypt_ls_ucode_ga100.c
-void acr_decrypt_firmware(LSF_Descriptor* lsf, uint8_t* encrypted_data) {
-    uint32_t keyIndex = lsf->aesKeyIdx;
-    
-    // Key loading - source UNKNOWN
-    uint8_t* aesKey = ??? // Where does this come from?
-    
-    // Decrypt with AES-CBC
-    AES_CBC_Decrypt(
-        encrypted_data,
-        lsf->binSize,
-        aesKey,              // 256-bit key
-        NULL,                // IV (if used)
-        decrypted_output
-    );
-}
+**Actual authentication formula** (binary-confirmed):
 ```
+dmHash     = DaviesMeyer_AES128(ucode_bytes_16B_blocks)   // via SCP R2/R3/R4
+derivedKey = AES-ECB(key=SCP_slot43, plain=g_kdfSalt XOR falconId)
+computedSig = AES-ECB(key=derivedKey, plain=dmHash)
+PASS if computedSig == lsbHeader.signature[16B]
+```
+
+KDF salt (public, embedded in signed binary): `B6 C2 31 E9 03 B2 77 D7 0E 32 A0 69 8F 4E 80 62`  
+SCP slot: `falc_scp_secret(0x2B=43, SCP_R2)` — opcode `cci 0xc2b2` binary-confirmed.
 
 ### Investigation Areas
 
@@ -292,105 +287,53 @@ void acr_decrypt_firmware(LSF_Descriptor* lsf, uint8_t* encrypted_data) {
 
 ---
 
-## Vulnerability 4: Memory Training State Not Cryptographically Verified
+## Vulnerability 4: HBM2e Memory Training State Not Cryptographically Verified
 
-### Severity: HIGH
+### Severity: MEDIUM (attack surface is VBIOS/DEVINIT, not a Falcon ucode file)
+
+> **CORRECTION (Phase-2)**: The original analysis referenced `fbflcn_gddr_boot_time_training_ga100.c` and framed this as a GDDR6 vulnerability. **Both are wrong for GA100.** GA100 uses **HBM2e** (not GDDR6), and no `fbflcn_gddr_boot_time_training_ga100.c` exists in the source tree. The GDDR6 training files (`fbflcn_gddr_boot_time_training_ga10x.c` and `_tu10x.c`) target other chips (GA102/TU10x). GA100 HBM2e initialization is handled by:
+> - **DEVINIT**: VBIOS-embedded PMU scripted sequencer (at POST time; not a Falcon ucode covered by AES-DM)
+> - **HULK**: HBM2e row-remap/training ucode (TargetID=5 = FBFalcon, embedded in VBIOS Image #2, confirmed in `2-6-vbios-ucode-catalog.md`)
 
 ### Location
-**File**: `uproc/fbflcn/src/fbflcn_gddr_boot_time_training_ga100.c`  
-**Function**: Memory training routine  
-**Data**: Training results (timing, voltage, equalization)
+**Target**: HULK ucode (`HULK_PROD` / `HULK_DBG` entries in VBIOS Image #2) + DEVINIT PMU script  
+**Data**: HBM2e row-remap training results and timing parameters
 
 ### Root Cause
 
-GDDR6 memory requires signal integrity calibration at boot time. GA100 performs multi-phase training to determine optimal timing (PI offset), voltage (VREF), and equalization (DFE) parameters. However, the training results are not cryptographically verified - they are simply stored as mutable runtime state.
-
-### Code Pattern
-
-```c
-// Simplified from fbflcn_gddr_boot_time_training_ga100.c
-void perform_memory_training(void) {
-    uint32_t training_results[100];
-    
-    // Phase 1: Initial training
-    perform_training_phase_1(&training_results[0]);
-    
-    // Phase 2-6: Iterative refinement
-    for (int phase = 2; phase <= 6; phase++) {
-        perform_training_phase(phase, &training_results[0]);
-    }
-    
-    // Store results in WPR (mutable, unverified)
-    memcpy(g_wprTrainingState, training_results, sizeof(training_results));
-    
-    // CRITICAL: No verification of results
-    // No MAC/signature of training state
-    // No detection of fault injection
-}
-```
+GA100 HBM2e requires signal integrity initialization and row-remapper configuration at POST time. The HULK ucode performs row-remap table updates and HBM2e training; the DEVINIT PMU scripted sequencer initializes the HBM2e PHY timing. These results are not cryptographically verified by the ACR chain — they are stored as mutable runtime state in WPR.
 
 ### Attack Vectors
 
-**Fault Injection During Training**:
-1. Attacker fault-injects memory training (electromagnetic pulse, laser, etc.)
-2. Training algorithm computes incorrect parameters
-3. Falcon stores incorrect parameters in WPR
-4. System operates with corrupted memory configuration
-5. Result: Bit flips, data corruption, or denial of service
+**HULK/DEVINIT Tampering**:
+1. Attacker modifies HULK ucode in VBIOS (via SPI flash write or crafted VBIOS update)
+2. HULK writes incorrect row-remap entries or HBM2e timing parameters
+3. Results stored in WPR runtime state without ACR re-verification
+4. Memory accesses use corrupted configuration
 
-**Training Result Corruption**:
-1. After training completes, Falcon writes results to WPR
-2. Results stored as mutable runtime state
-3. Attacker corrupts training state in WPR
-4. Subsequent memory access uses corrupted parameters
-5. Result: Persistent memory corruption
-
-**Side-Channel from Training**:
-1. Training results leak information about memory chip
-2. Different training patterns for different memory layouts
-3. Timing side-channels during training phase
-4. Information about memory configuration disclosed
+**Fault Injection During HBM2e Training**:
+1. Attacker fault-injects during DEVINIT/HULK execution (EM pulse, laser)
+2. HBM2e training algorithm computes incorrect parameters
+3. Incorrect parameters stored in mutable WPR/DRAM state
+4. Result: Bit flips, data corruption, or denial of service
 
 ### Impact
 
-1. **Denial of Service**: Corrupted memory makes GPU unusable
-2. **Data Corruption**: Bit flips in GPU memory
-3. **Information Disclosure**: Memory layout information
-4. **Persistent Compromise**: Corrupted state persists across resets
+1. **Denial of Service**: Corrupted HBM2e configuration makes GPU unusable
+2. **Data Corruption**: Bit flips in HBM2e memory if timing parameters are wrong
+3. **Persistent Compromise**: Corrupted state survives re-use if stored in non-volatile WPR regions
 
 ### Exploitability Assessment
 
-**Difficulty**: MEDIUM to HIGH
-- Requires fault injection capability
-- Training parameters are hardware-specific
-- Requires understanding of memory controller
-
-**Likelihood**: MEDIUM
-- Fault injection requires specialized equipment
-- Applicable to hardware-level attacks
-- Not practical for remote exploitation
-
-### Proof-of-Concept Outline
-
-```python
-class MemoryTrainingAttack:
-    def __init__(self):
-        # Fault injection at specific time during training
-        self.injection_phase = 3  # During phase 3
-        self.injection_location = "PI_CALCULATION"  # Target phase/interval offset
-        
-    def execute(self):
-        # 1. Trigger memory training
-        # 2. At exact moment, inject fault (EM pulse, laser, etc.)
-        # 3. Training algorithm produces corrupted result
-        # 4. Corrupted parameters stored in WPR
-        # 5. System now has persistent memory corruption
-```
+**Difficulty**: HIGH
+- Requires VBIOS modification or physical fault injection
+- Hardware-specific parameters; requires HBM2e PHY knowledge
+- Not practical for remote exploitation without VBIOS flash access
 
 ### Files Involved
-- `fbflcn_gddr_boot_time_training_ga100.c` - Training implementation
-- `fbflcn_gddr_mclk_switch_ga100.c` - Memory controller configuration
-- Training state storage in WPR
+- VBIOS Image #2: `HULK_PROD` @ CMP 0x2FEA0 (16,240 B), `HULK_DBG` @ 0x2BEF4 (16,240 B), TargetID=5 (FBFalcon)
+- VBIOS DEVINIT script (PMU scripted sequencer, VBIOS-embedded)
+- `uproc/acr/src/acrshared/ampere/acr_war_functions_ga100_only.c` — `_acrCheckWprRangeWithRowRemapperReserveFB_GA100`, `_acrDisableMemoryLockRangeRowRemapWARBug2968134_GA100`
 
 ---
 
@@ -491,23 +434,24 @@ class OffsetValidationBypass:
 
 ---
 
-## Vulnerability 6: VREF Voltage Control Unchecked
+## Vulnerability 6: HBM2e VREF Voltage Control Unchecked
 
-### Severity: MEDIUM
+### Severity: MEDIUM (hardware access required; DEVINIT/HULK path, not GDDR6)
+
+> **CORRECTION**: `fbflcn_gddr_boot_time_training_ga100.c` does NOT exist. GA100 uses HBM2e; VREF adjustments for HBM2e are performed by the DEVINIT PMU script and HULK ucode embedded in the VBIOS. The code pattern below is pseudocode for illustrative purposes only — it does not reflect actual GA100 source.
 
 ### Location
-**File**: `uproc/fbflcn/src/fbflcn_gddr_boot_time_training_ga100.c`  
-**Function**: VREF adjustment routine  
-**Hardware**: GDDR6 voltage reference
+**Target**: HULK ucode (FBFalcon, VBIOS Image #2) + DEVINIT PMU script — not a standalone Falcon ucode file  
+**Hardware**: HBM2e PHY voltage reference (not GDDR6 VREF)
 
 ### Root Cause
 
-Memory training adjusts voltage reference (VREF) to find optimal operating point. However, no range validation ensures the voltage stays within safe hardware limits.
+HBM2e initialization adjusts voltage reference (VREF) to find the optimal operating point. The DEVINIT script / HULK ucode writes these values to the HBM2e PHY without external range validation from the ACR chain. Over-voltage or under-voltage parameters could cause hardware damage or signal integrity failures.
 
-### Code Pattern
+### Code Pattern (pseudocode only — actual behavior is in DEVINIT script byte-code)
 
 ```c
-// From fbflcn_gddr_boot_time_training_ga100.c
+// Pseudocode — NOT from fbflcn_gddr_boot_time_training_ga100.c (file does not exist)
 void adjust_vref(uint32_t vref_code) {
     // CRITICAL: No validation of vref_code against hardware limits
     
@@ -559,8 +503,8 @@ void adjust_vref(uint32_t vref_code) {
 - Hardware safeguards may limit damage
 
 ### Files Involved
-- `fbflcn_gddr_boot_time_training_ga100.c` - VREF adjustment
-- Hardware register definitions for VREF control
+- VBIOS Image #2: `HULK_PROD` ucode (FBFalcon, TargetID=5) — HBM2e row-remap and timing (no `fbflcn_gddr_boot_time_training_ga100.c` exists)
+- Hardware register definitions for HBM2e PHY VREF control
 
 ---
 

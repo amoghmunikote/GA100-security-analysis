@@ -1,8 +1,8 @@
-# Reverse Engineering Targets - Binary Analysis Roadmap
+# 1.2 — Reverse Engineering Methodology and Targets
 
 ## Overview
 
-Complete source code analysis has identified vulnerabilities in firmware architecture and security logic. To confirm exploitability and develop practical attacks, binary reverse engineering is required on the prebuilt GA100 firmware artifacts in the lapsus archive.
+Complete source code analysis has identified vulnerabilities in firmware architecture and security logic. To confirm exploitability and develop practical attacks, binary reverse engineering is required on the prebuilt GA100 firmware artifacts in the archive.
 
 This document provides a systematic roadmap for binary analysis.
 
@@ -12,7 +12,7 @@ This document provides a systematic roadmap for binary analysis.
 
 ### Location
 ```
-d:\lapsus\integ\gpu_drv\stage_rel\uproc\nvriscv\prebuilt\
+workspace/integ/gpu_drv/stage_rel/uproc/nvriscv/prebuilt/
 ```
 
 ### Artifacts Available
@@ -319,7 +319,7 @@ d:\lapsus\integ\gpu_drv\stage_rel\uproc\nvriscv\prebuilt\
 
 **Objective**: Confirm training state lacks cryptographic verification
 
-**Location**: `fbflcn_gddr_boot_time_training_ga100.c`
+**Location**: GA100 uses HBM2e, NOT GDDR6. `fbflcn_gddr_boot_time_training_ga100.c` does NOT exist in the source tree. The relevant target is the **HULK** ucode (FBFalcon, TargetID=5 in VBIOS Image #2) and the **DEVINIT** PMU scripted sequencer embedded in the VBIOS.
 
 **Strategy**:
 

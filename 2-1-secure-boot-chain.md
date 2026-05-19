@@ -1,4 +1,4 @@
-# Secure Boot Chain - GA100 Architecture
+# 2.1 — Secure Boot Chain Overview
 
 ## Overview
 
@@ -6,7 +6,10 @@ The NVIDIA Ampere GA100 secure boot chain consists of a four-stage authenticatio
 
 **Trust Root**: Immutable boot ROM with NVIDIA public key (production and debug variants)  
 **Final Execution**: Falcon microcontroller with full GPU resource access  
-**Verification Mechanism**: RSA-3072 + SHA-256 with AES-CBC symmetric decryption  
+**Verification Mechanism**: RSA-3072 + SHA-256 with AES-CBC symmetric decryption
+
+> **CORRECTION (/4 binary analysis — see `6-1-crypto-auth-chain-map.md` §5, `6-2-verification-state-machine.md` §3):**  
+> The "AES-CBC" claim above is **wrong for GA100 LS falcon authentication**. GA100 uses the TU10X code path, not the GA10X path. LS ucode authentication is AES-DM (Davies-Meyer 128-bit hash over 16-byte blocks via SCP) + AES-ECB KDF via **SCP slot 43** — not AES-CBC. The GA10X AES-CBC path (`acr_decrypt_ls_ucode_ga10x.c`) is absent from the GA100 production binary (## confirmed). RSA-3072-PSS-SHA256 is correct but only for Booter's verification of GSP-RM (layer L3). All other LS falcons (PMU, SEC2, FECS, GPCCS, NVDEC) are authenticated via the AES-DM scheme.  
 
 ---
 
@@ -60,7 +63,7 @@ The NVIDIA Ampere GA100 secure boot chain consists of a four-stage authenticatio
    - Cannot be modified after verification without detection
 
 3. **Microcode Loading**
-   - Falcon (x86-like ISA) for memory/thermal management
+   - Falcon (custom 32-bit Harvard-architecture core with Renesas-like ISA) for memory/thermal management
    - GSP (GPU System Processor) - RISC-V based
    - PMU (Power Management Unit) - RISC-V based
    - SEC (Security Processor) - RISC-V based
@@ -83,26 +86,25 @@ The NVIDIA Ampere GA100 secure boot chain consists of a four-stage authenticatio
 **Purpose**: Execute privileged GPU firmware for memory management, thermal control, and runtime security
 
 **Architecture**:
-- **ISA**: x86-like instruction set (not x86, proprietary GA100 variant)
+- **ISA**: Custom 32-bit Harvard-architecture core with Renesas-like ISA (NOT x86 or x86-like; the ISA has superficial register-naming similarities but is a proprietary NVIDIA design)
 - **Execution Context**: Privileged mode with direct hardware access
 - **Memory Access**: Can read/write entire GPU DRAM including WPR
 - **MMIO Access**: Direct control of GPU registers via BAR0
-- **Privilege Levels**: Multiple privilege modes with exception handling
+- **Privilege Levels**: HS (High Secure, hardware-authenticated) and LS (Low Secure, software-authenticated) modes
 
 **Firmware Components**:
 
-1. **Memory Training** (`fbflcn_gddr_boot_time_training_ga100.c`)
-   - GDDR6 signal integrity calibration
-   - Determines optimal timing for data access
-   - Adjusts voltage reference (VREF), phase/interval offset (PI), and equalization (DFE)
-   - Results stored in mutable runtime state (NOT cryptographically verified)
+1. **Memory Training** — GA100 uses HBM2e (not GDDR6). There is no `fbflcn_gddr_boot_time_training_ga100.c`; that file does not exist in the source tree. HBM2e initialization is handled by:
+   - **DEVINIT**: VBIOS-embedded PMU scripted sequencer (handles HBM2e training at POST time; not a standalone Falcon ucode)
+   - **HULK**: HBM2e row-remap / memory training ucode embedded in VBIOS Image #2 (TargetID=5 = FBFalcon; see `2-6-vbios-ucode-catalog.md`)
+   - Training results stored in mutable runtime state (NOT cryptographically verified by ACR)
 
-2. **Memory Controller** (`fbflcn_gddr_mclk_switch_ga100.c`)
-   - Dynamic clock frequency switching
+2. **Memory Controller** (`fbflcn_hbm_mclk_switch.c`)
+   - Dynamic HBM2e clock frequency switching (not GDDR6; no `fbflcn_gddr_mclk_switch_ga100.c` exists)
    - Monitors thermal state
    - Implements power management
 
-3. **Core Execution** (`fbfalcon_ga100.c`)
+3. **Core Execution** (`fbfalcon_ga10x.c` / `interrupts_ga100.c` for GA100-specific interrupt handling)
    - Exception handling (interrupt vectors, privileged mode management)
    - IPC (Inter-Process Communication) with host driver
    - Watchdog timers and panic handlers
@@ -158,18 +160,17 @@ Runtime GPU Control
 - Minimal implementation complexity
 
 ### Stage 2 (ACR) - CRITICAL RISK
-- **File**: `acr_wpr_ctrl_ga10x.c` - Dependency map bounds violation
-- **File**: `acr_dma_ga100.c` - SMC instance not validated
-- **File**: `acr_decrypt_ls_ucode_ga100.c` - AES key source unknown
-- Verification logic before WPR lockdown
-- Offset validation gaps in LSF parsing
-- Version rollback in dependency map
+- **File**: `acr_wpr_ctrl_ga10x.c` - Dependency map bounds violation (GA10X+ path; absent from GA100 prod binary — see Phase-3)
+- **File**: `acr_dma_ga100.c` - SMC instance `falconInstance << 21` unchecked (W-level finding; no attacker-reachable path confirmed)
+- **AES auth**: GA100 uses AES-DM + SCP slot 43 (NOT AES-CBC; `acr_decrypt_ls_ucode_ga100.c` is for GA10X+ only and absent from GA100 prod AHESASC) — resolved in Phase-3
+- WPR lock fires before LS signature verification (timing gap documented; no confirmed exploitable path)
+- Pre-verify DMA scribble via driver-controlled `blDataOffset` (W-6; MEDIUM — ring-0 prerequisite)
 
-### Stage 3 (Falcon) - HIGH RISK
-- **File**: `fbflcn_gddr_boot_time_training_ga100.c` - Training state unverified
-- Memory training results not cryptographically verified
-- Fault injection opportunities in calibration
-- Runtime state corruption possible
+### Stage 3 (Falcon / DEVINIT) - HIGH RISK
+- **Training target**: HULK ucode (FBFalcon, TargetID=5, VBIOS-embedded) + DEVINIT PMU script — not a standalone Falcon ucode file
+- HBM2e training results not cryptographically verified
+- Fault injection opportunities in HBM2e calibration (DEVINIT/VBIOS path)
+- Runtime state corruption possible via HULK or DEVINIT script tampering
 
 ### Stage 4 (Runtime) - MEDIUM RISK
 - SMC instance validation gaps
@@ -238,17 +239,17 @@ Runtime GPU Control
 
 ## Next Steps
 
-1. **Phase 2 (Binary Analysis)**:
+1. **## (Binary Analysis)**:
    - Disassemble bootloader and ACR firmware from prebuilt binaries
    - Extract RSA verification implementation
    - Analyze AES key derivation
 
-2. **Phase 3 (Vulnerability Confirmation)**:
+2. **## (Vulnerability Confirmation)**:
    - Trace each vulnerability from source code through to exploitability
    - Generate proof-of-concept code for SMC instance bypass
    - Demonstrate dependency map bounds violation
 
-3. **Phase 4 (Exploitation)**:
+3. **## (Exploitation)**:
    - Chain vulnerabilities for persistent firmware compromise
    - Develop exploit code for each attack surface
    - Test impact on GPU functionality

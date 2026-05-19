@@ -1,4 +1,4 @@
-# IPC and Command Interfaces - Host-Firmware Communication
+# 4.3 — Runtime IPC and Command Interfaces
 
 ## Overview
 

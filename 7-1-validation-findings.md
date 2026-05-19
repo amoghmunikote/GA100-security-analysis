@@ -1,15 +1,15 @@
-# Phase-2 Validation & New Findings — GA100 / CMP 170HX
+# 7.1 — Validation and New Findings
 
 **Status**: Source-validated against the actual archive at
-`d:\lapsus\integ\gpu_drv\stage_rel\` and the VBIOS dump
-`d:\lapsus\cmp170hxBinary.BIN` (1 044 480 B = 0xFF000, PCI device
+`workspace/integ/gpu_drv/stage_rel/` and the VBIOS dump
+`workspace/<GPU ROM archive>` (1 044 480 B = 0xFF000, PCI device
 `0x10DE:0x20C2`, IFR magic `NVGI`, BIT/PCIR tables intact).
 
 > **Errata vs original Phase-2 draft**: file size was reported as
 > 1 048 848 B; the correct value is **1 044 480 B (0xFF000)**, matched
 > exactly by the A100 reference VBIOS
-> `NVIDIA.A100.40960.200214.BIN`. See
-> `14_PHASE3_BINARY_REVERSE_ENGINEERING.md §3` for the side-by-side.
+> `workspace/<GPU ROM archive>`. See
+> `7-2-phase3-binary-analysis.md §3` for the side-by-side.
 
 This document re-grades the eight Phase-1 vulnerability hypotheses
 against actual source, then adds four new findings that were not in the
@@ -54,7 +54,7 @@ VBIOS, not in a Falcon ucode in this tree. The correct re-frame is
 
 ### 1.2 Falcon ISA, not "x86-like"
 
-`01_SECURE_BOOT_CHAIN.md:86` calls Falcon "x86-like." That is wrong.
+`2-1-secure-boot-chain.md:86` calls Falcon "x86-like." That is wrong.
 Falcon is a custom 32-bit Harvard-architecture core with a Renesas-like
 ISA. The disassembly conventions you'll need are documented in NVIDIA's
 "Envytools" reverse-engineering project. Treating it as x86 will mislead
@@ -200,7 +200,7 @@ indirection long before the multiplication wrapped.
 > Turing-era AES-DM signature path from
 > `acr_verify_ls_signature_tu10x.c`. The correct, binary-validated
 > description is in
-> `14_PHASE3_BINARY_REVERSE_ENGINEERING.md §3a`.
+> `7-2-phase3-binary-analysis.md §3a`.
 >
 > Key corrections:
 > - SCP slot used on GA100 is **43** (not 31)
@@ -230,26 +230,19 @@ falc_scp_encrypt(SCP_R1, SCP_R3);
 falc_scp_rkey10(SCP_R3, SCP_R4);
 ```
 
-Findings:
+**NOTE: The following findings describe the GA10X+ path (`acr_decrypt_ls_ucode_ga10x.c`). GA100 prod does NOT use this path (see errata above). For GA100 prod, replace slot 31 with slot 43, AES-DM signature with no LS encryption (cleartext ucodes), and disregard references to "decrypting" LS firmware.**
+
+Findings (GA10X+ path — NOT GA100 prod; corrected for GA100 where noted):
 
 1. **Key is per-Falcon-class, not per-device.** `falconID` is XORed
    into only the first 4 bytes of the salt; the master key is SCP
-   secret slot 31 (PROD). Slot 31 is fused at silicon level and the
-   same value across all production GA100/CMP170HX silicon.
-2. **Salt is hardcoded and public** (shown above).
-3. **One-time extraction of SCP slot 31 trivially decrypts all LS
-   firmware** for the entire CMP/A100 fleet for every Falcon class —
-   the only per-image variation is the IV from
-   `pUcodeDescV2->lsEncIV[]`, which is in the descriptor in cleartext.
-4. SCP slot 31 is only readable while running in HS mode and is wiped
-   from registers at exit ([:512-525](integ/gpu_drv/stage_rel/uproc/acr/src/ahesasc/ampere/acr_decrypt_ls_ucode_ga10x.c#L512-L525)).
-   So extracting it requires an HS-mode RCE primitive (e.g. via the
-   ITCM bootstub gadget, §3.1) or SCA / fault injection on the SCP unit.
-5. **Confidentiality is therefore primarily silicon-mediated**, not
-   cryptographic — once any HS bug exists, encryption gives nothing.
+   secret ~~slot 31~~ **slot 43 on GA100 prod** (slot 31 is the GA10X LS-encrypt key; slot 43 is the GA100 LS-auth key). Both slots are fused at silicon level and the same value across all production silicon of their respective chip families.
+2. **Salt is hardcoded and public** (shown above — applies to both GA10X slot 31 and GA100 slot 43 AES-DM salt).
+3. **On GA10X+, one-time extraction of SCP slot 31 enables decryption of all LS firmware** for those chips. **On GA100 prod, one-time extraction of SCP slot 43 enables LS signature forgery** for all falconIds across all GA100s (LS ucodes ship in cleartext; confidentiality is not the concern on GA100 — authentication is). See `7-2-phase3-binary-analysis.md §3a.4`.
+4. SCP slot 31 (GA10X) / SCP slot 43 (GA100) is only accessible while running in HS mode and is wiped from registers at exit. Extracting it requires an HS-mode RCE primitive or SCA / fault injection on the SCP unit. ~~(ITCM bootstub gadget, §3.1)~~ **The ITCM bootstub gadget was downgraded to INFORMATIONAL by Phase-3 — it is absent from the prod binary.**
+5. **Confidentiality is therefore primarily silicon-mediated**, not cryptographic — once any HS bug exists, authentication/encryption gives nothing.
 
-Phase-1 finding #3 graded "key derivation undocumented" — this is now
-fully documented above.
+Phase-1 finding #3 graded "key derivation undocumented" — this is now fully documented above (with corrections applied for GA100 prod path).
 
 ### 2.4 LSF offset validation — partially valid
 
@@ -463,14 +456,14 @@ expressible by `(offset, size)`" as pre-signature-verify capabilities.
 
 | Rank | Target | Why first |
 |---|---|---|
-| 1 | **GA100 RISC-V ITCM bootstub gadget** (§3.1) | Direct privilege-escalation primitive baked into prod ACR; smallest gap between "find a way to influence wprAddress" and "execute LEVEL2 RISC-V" |
+| 1 | ~~**GA100 RISC-V ITCM bootstub gadget** (§3.1)~~ **DOWNGRADED — INFORMATIONAL** | Phase-3 binary confirmed `acrlibSetupBootvecRiscv_GA100` is NOT in the prod-signed ASB binary (`ACR_RISCV_LS` define absent). No ITCM machine-code emission. See `7-2-phase3-binary-analysis.md §3b`. |
 | 2 | **GSP-RM DMEM open PLM** (§3.2) | No isolation between driver and GSP-RM RPC server; given a kernel-mode primitive on host this is a one-step compromise |
 | 3 | **GSP FBIF REGIONCFG disabled** (§3.3) | All DMA paths on GSP-RM operate without per-channel region isolation |
-| 4 | **Pre-verify WPR scribble** (§3.4) | Useful as a primitive to support other attacks (key zeroing, header rewriting between iterations) |
-| 5 | **AES SCP slot 31 extraction** (§2.3) | Once it falls, all GA100 LS firmware is plaintext globally; only the silicon and the ITCM gadget protect it |
+| 4 | **Pre-verify WPR scribble** (§3.4) | Useful as a primitive to support other attacks (key zeroing, header rewriting between iterations) — confirmed as W-6; see `5-4-vuln-dma-scribble.md` |
+| 5 | **AES SCP slot 43 extraction** (§2.3) — **CORRECTION: slot is 43 (0x2B), not 31** | Once it falls, all GA100 LS firmware signatures are forgeable globally; binary-confirmed `cci 0xc2b2` = `scp_secret(0x2B=43, SCP_R2)` in AHESASC. See `7-2-phase3-binary-analysis.md §3a`. |
 | 6 | **SMC_INFO aperture usage audit** (§2.1) | Find any consumer of `NV_PGRAPH_PRI_*_SMC_INFO` that didn't get the legacy-aperture WAR |
-| 7 | **VBIOS DEVINIT script auth** (§1.1) | Real GA100 HBM2e training lives here; review the IFR/BIT chain in `cmp170hxBinary.BIN` |
-| 8 | **`acrlibSetupBootvecRiscv_GA100` callers** | Trace every path that feeds `wprAddress` and `regionId`; correlate with §3.1 |
+| 7 | **VBIOS DEVINIT script auth** (§1.1) | Real GA100 HBM2e training lives here; review the IFR/BIT chain in `workspace/<GPU ROM archive>` |
+| 8 | ~~**`acrlibSetupBootvecRiscv_GA100` callers**~~ **MOOT** | Phase-3 confirmed this function is absent from the prod binary. No follow-up needed. See `7-2-phase3-binary-analysis.md §3b`. |
 
 ---
 
@@ -484,7 +477,7 @@ expressible by `(offset, size)`" as pre-signature-verify capabilities.
    and locate where `MSPM`/`MRSP` are re-written after the bootstub
    exits — if GSP-RM never re-restricts itself, the bootstub's LEVEL2
    becomes permanent.
-3. Carve out the VBIOS sections from `cmp170hxBinary.BIN` starting at
+3. Carve out the VBIOS sections from `workspace/<GPU ROM archive>` starting at
    the BIT table at 0x5EB2 and locate the DEVINIT script + the embedded
    PMU/FECS bootloaders.
 4. Cross-reference RPC functions in

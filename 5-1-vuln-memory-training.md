@@ -1,10 +1,23 @@
-# Memory Training Vulnerabilities - GDDR6 Calibration Attacks
+# 5.1 — Vulnerability Analysis: Memory Training
 
-## Overview
+> **CRITICAL CORRECTION (Phase-2, confirmed Phase-3)**: The entire original document below was written under the false assumption that GA100 uses **GDDR6** memory. **GA100 uses HBM2e.** There is no `fbflcn_gddr_boot_time_training_ga100.c` in the source tree. The GDDR6 code paths (`fbflcn_gddr_boot_time_training_ga10x.c` / `_tu10x.c`) target GA102/TU1x chips, not GA100.
+>
+> **Correct GA100 HBM2e training architecture:**
+> - **DEVINIT**: VBIOS-embedded PMU scripted sequencer. Runs at POST time from the VBIOS. Initializes HBM2e PHY timing, voltages, and training parameters. Not a standalone Falcon ucode — it is a byte-code script interpreted by a PMU scripted sequencer engine embedded in the VBIOS. Not covered by ACR's AES-DM verification chain.
+> - **HULK ucode**: HBM2e row-remap / memory training ucode. Runs on FBFalcon (TargetID=5). Embedded in VBIOS Image #2 as `HULK_PROD` (@ CMP 0x2FEA0, 16,240 B) and `HULK_DBG`. Covered by the VBIOS trust chain, not the ACR LS chain.
+> - **ACR WAR functions** (`acr_war_functions_ga100_only.c`): `_acrCheckWprRangeWithRowRemapperReserveFB_GA100` and `_acrDisableMemoryLockRangeRowRemapWARBug2968134_GA100` — these are WPR placement validators that are HBM2e row-remapper-aware. They run inside AHESASC and are covered by HS verification.
+>
+> **The core security concern is valid** (training results stored without ACR re-verification), but the attack surface is the VBIOS DEVINIT script and HULK ucode, not a standalone Falcon ucode file. See `2-3-firmware-parsing-vulns.md §Vulnerability 4` (corrected) and `2-6-vbios-ucode-catalog.md` for binary-confirmed HULK layout.
+>
+> The remainder of this document is **retained as historical context** for the Phase-1 analysis. All code snippets are pseudocode based on the (incorrect) GDDR6 assumption and do NOT represent actual GA100 behavior.
 
-GDDR6 memory requires signal integrity calibration at boot time to establish optimal timing, voltage, and equalization parameters. GA100 performs multi-phase training automatically, but the results are not cryptographically verified. This enables fault injection attacks and persistent memory corruption scenarios.
+## Overview (SUPERSEDED — see correction above)
 
-**Critical Gap**: Training results are stored as mutable runtime state without integrity protection
+~~GDDR6~~ **HBM2e** memory requires signal integrity initialization at boot time. GA100's DEVINIT PMU script and HULK ucode perform this training, but the results are not re-verified by the ACR cryptographic chain. This enables fault injection attacks against DEVINIT/HULK execution and persistent WPR state corruption.
+
+**Critical Gap**: HBM2e training results (DEVINIT output, row-remap tables) are stored as mutable runtime state without ACR re-verification
+
+**Original (incorrect) text follows for historical reference:**
 
 ---
 
@@ -53,7 +66,7 @@ If training fails or uses wrong parameters:
 
 ## Training Algorithm Phases
 
-### Phase 1: Initial Scan
+### Initial Scan
 
 ```c
 void training_phase_1(void) {
@@ -76,7 +89,7 @@ void training_phase_1(void) {
 **Purpose**: Find any stable PI offset  
 **Output**: Approximate PI value
 
-### Phase 2: PI Fine-Tuning
+### PI Fine-Tuning
 
 ```c
 void training_phase_2(void) {
@@ -101,7 +114,7 @@ void training_phase_2(void) {
 **Purpose**: Optimize PI for minimum errors  
 **Output**: Optimal PI value
 
-### Phase 3: VREF Coarse Adjustment
+### VREF Coarse Adjustment
 
 ```c
 void training_phase_3(void) {
@@ -123,7 +136,7 @@ void training_phase_3(void) {
 **Purpose**: Find stable voltage range  
 **Output**: Approximate VREF value
 
-### Phase 4: VREF Fine-Tuning
+### VREF Fine-Tuning
 
 ```c
 void training_phase_4(void) {
@@ -148,7 +161,7 @@ void training_phase_4(void) {
 **Purpose**: Optimize VREF for minimum errors  
 **Output**: Optimal VREF value
 
-### Phase 5-6: DFE and Advanced Adjustments
+### -6: DFE and Advanced Adjustments
 
 ```c
 void training_phase_5(void) {
@@ -280,7 +293,7 @@ void apply_training_state(void) {
 
 **Scenario**:
 ```
-During Phase 2 (PI fine-tuning):
+During ## (PI fine-tuning):
 1. Algorithm iterates through PI offsets
 2. Attacker injects fault (electromagnetic pulse, laser)
 3. Fault causes test_memory_pattern() to return 0 errors
@@ -536,37 +549,35 @@ void initialize_voltage_protection(void) {
 
 ---
 
-## Investigation Checklist
+## Investigation Checklist (updated for actual GA100 HBM2e architecture)
 
-- [ ] Locate training state storage in WPR
-- [ ] Extract training algorithm from `fbflcn_gddr_boot_time_training_ga100.c`
-- [ ] Identify all training parameters and hardware registers
-- [ ] Verify no MAC/signature on training state
-- [ ] Check for range validation on parameters
-- [ ] Map memory layout for fault injection targets
-- [ ] Test corrupted training state impact
-- [ ] Develop fault injection proof-of-concept
-- [ ] Measure bit flip rate with corrupted training
-- [ ] Document recovery procedures
+- [x] Identified correct training path: DEVINIT PMU script + HULK ucode (not GDDR6 fbflcn file)
+- [x] HULK ucode confirmed in VBIOS Image #2: `2-6-vbios-ucode-catalog.md`
+- [x] ACR WARs for HBM2e row-remapper confirmed: `_acrCheckWprRangeWithRowRemapperReserveFB_GA100`, `_acrDisableMemoryLockRangeRowRemapWARBug2968134_GA100`
+- [ ] Extract and analyze DEVINIT script from `<GPU ROM archive>` VBIOS Image #2 (BIT token 'd')
+- [ ] Analyze HULK ucode (binary, FBFalcon) for HBM2e row-remap write primitives
+- [ ] Verify whether HULK training results are stored in ACR-verifiable WPR state
+- [ ] Identify all HBM2e parameters written by DEVINIT and HULK
+- [x] `fbflcn_gddr_boot_time_training_ga100.c` confirmed non-existent: Phase-2 §1.1
 
 ---
 
 ## Key Questions
 
-**Q1**: Is training state cryptographically protected?  
-**A1**: NO - Source code shows no MAC or signature on training results
+**Q1**: Is training state cryptographically protected by ACR?  
+**A1**: NO — DEVINIT runs before ACR; HULK is VBIOS-trust-chain (not AES-DM). Results stored as mutable runtime state.
 
-**Q2**: Are training parameters validated after loading?  
-**A2**: UNKNOWN - Requires binary analysis; likely missing based on code pattern
+**Q2**: Which file implements GA100 HBM2e training?  
+**A2**: No standalone Falcon ucode file. DEVINIT PMU script (VBIOS-embedded) + HULK ucode (FBFalcon, VBIOS Image #2). `fbflcn_gddr_boot_time_training_ga100.c` does NOT exist.
 
-**Q3**: Can corrupted training state cause hardware damage?  
-**A3**: YES - Over-voltage from corrupted VREF can damage memory
+**Q3**: What memory type does GA100 use?  
+**A3**: HBM2e. NOT GDDR6. GDDR6 training files in this tree (`ga10x`, `tu10x`) target other chips.
 
-**Q4**: Are there hardware safeguards against over-voltage?  
-**A4**: UNKNOWN - May be limited to prevent firmware bugs
+**Q4**: Are ACR WARs present for HBM2e?  
+**A4**: YES — `_acrCheckWprRangeWithRowRemapperReserveFB_GA100` and `_acrDisableMemoryLockRangeRowRemapWARBug2968134_GA100` in AHESASC (binary-confirmed; see `7-2-phase3-binary-analysis.md` §2).
 
 **Q5**: What is the impact of training state corruption?  
-**A5**: HIGH - Persistent data corruption, hardware damage, denial of service
+**A5**: MEDIUM — HBM2e timing corruption via DEVINIT/HULK tampering can cause GPU malfunction; requires VBIOS flash access or fault injection. ACR does not re-verify DEVINIT outputs.
 
 ---
 

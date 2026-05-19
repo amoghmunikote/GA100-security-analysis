@@ -1,4 +1,4 @@
-# SMC/MIG Isolation - Multi-Instance Architecture
+# 4.1 — GPU Isolation: SMC and MIG
 
 ## Overview
 
@@ -402,25 +402,25 @@ if (calculated_addr < base || calculated_addr > address_space_limit) {
 
 ## Investigation Roadmap
 
-### Phase 1: Understand Instance ID Flow
+### Understand Instance ID Flow
 - [ ] Trace instance ID from driver through firmware
 - [ ] Identify all uses of NV_GET_PGRAPH_SMC_REG macro
 - [ ] Document places where instance ID is used without validation
 - [ ] Extract register definitions (dev_smcarb.h, dev_fbfalcon_csb.h)
 
-### Phase 2: Validate Vulnerability
+### Validate Vulnerability
 - [ ] Confirm maximum valid instance ID for GA100
 - [ ] Check if instance ID validation exists
 - [ ] Test with out-of-bounds instance ID in binary
 - [ ] Identify address calculation results
 
-### Phase 3: Map Exploitation Surface
+### Map Exploitation Surface
 - [ ] Identify valuable register targets
 - [ ] Test register write impact
 - [ ] Determine memory layout (address space positions)
 - [ ] Develop proof-of-concept exploit
 
-### Phase 4: Impact Assessment
+### Impact Assessment
 - [ ] Can instance isolation be completely bypassed?
 - [ ] Can firmware from one instance compromise another?
 - [ ] Can persistent compromise be achieved?

@@ -1,4 +1,4 @@
-# Falcon Privilege Boundaries - Microcontroller Security
+# 3.1 — Falcon Privilege Boundaries and Architecture
 
 ## Overview
 
@@ -10,10 +10,11 @@ The Falcon microcontroller is the central execution engine for GPU firmware, wit
 
 ### Processor Characteristics
 
-**ISA**: Proprietary x86-like instruction set (GA100-specific variant)
-- NOT standard x86 or x86-64
-- Includes privileged instructions for hardware access
-- Exception-based privilege transitions
+**ISA**: Custom 32-bit Harvard-architecture core with Renesas-like ISA
+- NOT x86, x86-64, or x86-like; the resemblance is superficial register naming only
+- NVIDIA proprietary design; load/store architecture with explicit IMEM/DMEM separation
+- Includes privileged HS/LS mode instructions for hardware access
+- HS (High Secure) and LS (Low Secure) privilege transitions via hardware authentication
 
 **Memory Model**:
 - Flat address space (no segmentation)
@@ -281,13 +282,14 @@ void panic(const char* msg) {
 ### Register State
 
 ```c
-// Falcon register set (x86-like)
+// Falcon register set (pseudocode — actual registers are $r0..$r15 in Renesas-like 32-bit ISA)
+// NOTE: eax/ebx/eip/eflags naming below is conceptual only; Falcon does NOT use x86 registers
 typedef struct {
-    uint32_t eax, ebx, ecx, edx;
-    uint32_t esi, edi, esp, ebp;
-    uint32_t eip;          // Instruction pointer
-    uint32_t eflags;       // Flags including privilege bit
-    uint32_t cs, ds, es, ss; // Segment registers (if supported)
+    uint32_t r[16];         // 16 general-purpose 32-bit registers ($r0 .. $r15)
+    uint32_t pc;            // Program counter
+    uint32_t sp;            // Stack pointer ($r15 typically)
+    uint32_t iv[2];         // Exception vectors (IV0, IV1)
+    uint32_t csw;           // Control/status word (privilege level)
 } Falcon_Registers;
 ```
 
@@ -554,25 +556,25 @@ Persistent firmware modification
 
 ## Investigation Roadmap
 
-### Phase 1: Extract Falcon ISA
+### Extract Falcon ISA
 - [ ] Disassemble prebuilt GA100-gsp firmware
 - [ ] Identify instruction set extensions
 - [ ] Extract privileged instructions
 - [ ] Map exception handling code
 
-### Phase 2: Analyze Privilege Boundaries
+### Analyze Privilege Boundaries
 - [ ] Locate exception vector table
 - [ ] Identify privilege mode enforcement
 - [ ] Map supervisor/user memory regions
 - [ ] Find protection enforcement mechanism
 
-### Phase 3: Identify Escalation Paths
+### Identify Escalation Paths
 - [ ] Find exception handlers in code
 - [ ] Analyze stack handling
 - [ ] Identify ROP gadgets
 - [ ] Test stack overflow impact
 
-### Phase 4: Develop Exploit
+### Develop Exploit
 - [ ] Craft malicious exception frame
 - [ ] Test privilege escalation
 - [ ] Achieve supervisor code execution
@@ -586,7 +588,7 @@ Persistent firmware modification
 **A1**: LIKELY - If supervisor memory is writable after boot
 
 **Q2**: Are there privilege escalation gadgets in Falcon code?  
-**A2**: LIKELY - x86-like ISA typically has abundant gadgets
+**A2**: LIKELY - Custom 32-bit RISC-like ISA with load/store architecture; ROP gadgets possible but analysis requires actual binary disassembly (see `7-2-phase3-binary-analysis.md`)
 
 **Q3**: Can stack overflow corrupt exception vectors?  
 **A3**: UNKNOWN - Depends on memory layout and stack isolation

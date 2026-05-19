@@ -1,4 +1,4 @@
-# FECS DMA and MMIO - Hardware Access Paths
+# 4.2 — GPU Isolation: FECS, DMA, and MMIO
 
 ## Overview
 

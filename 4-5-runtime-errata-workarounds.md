@@ -1,4 +1,4 @@
-# Workarounds and Errata - Silicon Bugs and Disabled Security
+# 4.5 — Runtime Errata and Workarounds
 
 ## Overview
 
@@ -469,26 +469,26 @@ acr_war_functions_ga100_a3.c  → All WARs (including optional)
 
 ## Investigation Roadmap
 
-### Phase 1: WAR Discovery
+### WAR Discovery
 - [ ] Locate all WAR functions in source/binary
 - [ ] Extract logic from each WAR
 - [ ] Identify conditions for each WAR
 - [ ] Map which WARs are security-critical
 - [ ] Identify version-specific variants
 
-### Phase 2: Condition Analysis
+### Condition Analysis
 - [ ] Determine each WAR's enable/disable condition
 - [ ] Identify configuration flags
 - [ ] Map driver control paths
 - [ ] Test condition satisfaction
 
-### Phase 3: Exploitation Development
+### Exploitation Development
 - [ ] Develop proof-of-concept for each WAR bypass
 - [ ] Chain WAR bypasses for complete security disabling
 - [ ] Test on real hardware
 - [ ] Document each attack path
 
-### Phase 4: Impact Assessment
+### Impact Assessment
 - [ ] Measure practical exploitability
 - [ ] Determine if WARs can be disabled
 - [ ] Test persistence of disabled WARs

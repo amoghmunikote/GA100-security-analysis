@@ -1,7 +1,7 @@
-# Phase-3 Binary Reverse-Engineering — GA100 / CMP 170HX
+# 7.2 — Binary Reverse Engineering
 
 **Scope**: Move from source-code claims (Phase-2,
-`13_PHASE2_VALIDATION_AND_NEW_FINDINGS.md`) to **binary evidence** of what
+`7-1-phase2-validation-findings.md`) to **binary evidence** of what
 is actually compiled into the production-signed firmware shipping on the
 CMP 170HX (device-ID `0x10DE:0x20C2`, chip ID `0x170` = GA100).
 
@@ -15,8 +15,8 @@ Material used (all under
 | ACR Unload (Falcon HS, runs on PMU) | `acr/bin/pmu/ga100/g_acruc_ga100_unload.{nm,objdump,readelf,out}` |
 | GSP RISC-V image | `gsp/bin/g_gsp_ga100_riscv.{elf,nm,objdump,readelf,image.bin}` |
 | Booter Load/Unload/Reload | `gsprm/bin/booter/ga100/{load,reload,unload}/` (no .nm/.objdump in tree) |
-| CMP 170HX VBIOS dump | `d:\lapsus\cmp170hxBinary.BIN` (1 044 480 B = 0xFF000) |
-| A100 reference VBIOS | `d:\lapsus\NVIDIA.A100.40960.200214.BIN` (1 044 480 B = 0xFF000) — cross-check source |
+| CMP 170HX VBIOS dump | `workspace/<GPU ROM archive>` (1 044 480 B = 0xFF000) |
+| A100 reference VBIOS | `workspace/<GPU ROM archive>` (1 044 480 B = 0xFF000) — cross-check source |
 
 The headline result: **two of the three "critical" findings in
 `13_PHASE2_*.md` are not present in the prod-signed silicon**. The
@@ -359,7 +359,7 @@ Offset      CMP 170HX (device 0x20C2)       A100 (device 0x20B0)
 Confirmed against both binaries:
 
 ```
-$ for f in cmp170hxBinary.BIN NVIDIA.A100.40960.200214.BIN; do
+$ for f in <GPU ROM archive> <GPU ROM archive>; do
     locate 55 AA at 0x100-aligned offsets in first 0xC0000 bytes
   done
 CMP:  0x5E00, 0xC700, 0x65E00, 0x6C700
@@ -569,7 +569,7 @@ No RSA, no SHA-256, no PSS, no LS-encrypt (slot 31 unused).
    vulnerability hypotheses do not apply to GA100; they apply only to
    GA10x and later chips that use the v2-blob path.
 
-3. **The "RSA-3072 trust root" framing in `01_SECURE_BOOT_CHAIN.md` is
+3. **The "RSA-3072 trust root" framing in `2-1-secure-boot-chain.md` is
    only correct at the HS-signature level** (ROM verifies Booter,
    Booter verifies ACR/AHESASC via RSA). The **LS** signatures on
    GA100 are AES-DM, not RSA. That has implications: AES-DM with a
@@ -651,7 +651,7 @@ binary; the Booter ELF/.nm/.objdump are not in this archive snapshot
 |---|---|---|---|
 | #1 SMC instance | CRITICAL | Partially valid, reframe to HW bug | **Confirmed**: ASB binary inlines `inst<<21` with no bounds check, but `falconInstance` is never attacker-derived in any reachable path. Risk = software bug-in-NVIDIA-pipeline only |
 | #2 DepMap OOB | CRITICAL | Latent — sig-covered | (n/a in binary — would need exploit POC) |
-| #3 AES key | CRITICAL | Resolved (SCP slot 31, salt public) | (not in ASB/AHESASC visible symbols; presumably in `acrDecryptAesCbcBuffer_GA10X` not present in this ASB) |
+| #3 AES key | CRITICAL | ~~Resolved (SCP slot 31, salt public)~~ **WRONG — Phase-2 described GA10X path** | **CORRECTED (§3a)**: GA100 uses AES-DM + SCP slot **43** (not 31). No LS encryption on GA100 (cleartext ucodes). `_acrDecryptAesCbcBuffer_GA10X` absent from prod binary. KDF: `AES-ECB(kdfSalt^falconId, slot43)`. Salt `B6C231E9...` is public. |
 | #4 Mem training unverified | HIGH | Invalid file path; lives in DEVINIT | **VBIOS BIT_DATA_FALCON_DATA carries DEVINIT** — Phase-4 extraction target |
 | #5 LSF offset | HIGH | Real as pre-verify DMA scribble | (not exposed in ASB symbols; AHESASC objdump can show it) |
 | #6 VREF unchecked | MEDIUM | Invalid for GA100 | Same — DEVINIT |
@@ -686,12 +686,7 @@ binary; the Booter ELF/.nm/.objdump are not in this archive snapshot
    confirm the LSF-offset trust boundary (Phase-1 #5 / Phase-2 §2.4).
    Look for whether `ucodeOffset` is re-validated after signature
    verify before being used as DMA source.
-4. **RE the AES key derivation path in AHESASC** — find
-   `acrDecryptAesCbcBuffer_GA10X` /
-   `acrGetDerivedKeyAndLoadScpTrace0_GA10X` in the AHESASC objdump and
-   confirm the SCP slot 31 reference and the salt at `0xB6C231E9
-   03B277D7 0E32A069 8F4E8062` is exactly the bytes embedded in the
-   prod binary.
+4. ~~**RE the AES key derivation path in AHESASC**~~ **COMPLETED (§3a)**: `acrDecryptAesCbcBuffer_GA10X` / `acrGetDerivedKeyAndLoadScpTrace0_GA10X` are **absent** from the GA100 prod AHESASC binary. The correct path is AES-DM + `_acrDeriveLsVerifKeyAndEncryptDmHash_TU10X` with SCP slot **43** (0x2B), not slot 31. Salt `B6 C2 31 E9 03 B2 77 D7 0E 32 A0 69 8F 4E 80 62` confirmed at file offset `0x2800`. No further RE needed.
 5. **Disassemble PMU ACR Unload binary**
    (`pmu/ga100/g_acruc_ga100_unload.{nm,objdump}` is present). Look
    for whether unload re-tightens or releases PLMs. Unload runs at

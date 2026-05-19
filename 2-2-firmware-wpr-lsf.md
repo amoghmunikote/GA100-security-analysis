@@ -1,4 +1,4 @@
-# Write-Protected Region (WPR) and Load-Safe Format (LSF) Parsing
+# 2.2 — Firmware Containers: WPR and LSF Format
 
 ## Overview
 
@@ -87,7 +87,7 @@ Each WPR contains multiple sub-regions:
 **Write Protection**:
 - Hardware write-protect register prevents modifications
 - Spans WPR address range
-- Cannot be disabled without full reset
+- ~~Cannot be disabled without full reset~~ **CORRECTION:** The ACR Unload path (`acrUnloadACR_TU10X`) explicitly clears `NV_PFB_PRI_MMU_WPR_ALLOW_READ/WRITE._WPR1` to `0x0` (all levels denied) and sets all sub-WPR access masks to `RMASK=0x0, WMASK=0x0` without requiring a GPU reset. WPR MMU registers can be reprogrammed by any HS (L3) code while the GPU is running. See `6-3-wpr-hardware-lockdown.md` §2.3.
 
 **Read Protection** (Limited):
 - Driver cannot read WPR contents
@@ -161,15 +161,15 @@ typedef struct {
    - No validation that `depfalconId` < dependency map size
    - Out-of-bounds read possible
 
-4. **Decryption** (if encrypted):
+4. **Authentication** (LS signature verification):
    ```
-   Decrypt binary payload with AES-CBC
-   ├─ Extract AES key index from LSF (aesKeyIdx)
-   ├─ Load AES key from WPR key storage
-   ├─ Decrypt binary data starting at binOffset
-   ├─ Verify decryption succeeded (magic number check)
-   └─ Use decrypted payload for execution
+   Authenticate binary payload via AES-DM + KDF + SCP slot 43
+   ├─ Compute AES-DM (Davies-Meyer) hash over 16-byte blocks via SCP
+   ├─ Derive per-falcon key: AES-ECB(key=SCP_slot43, plain=g_kdfSalt XOR falconId)
+   ├─ Compute sig: AES-ECB(key=derivedKey, plain=dmHash)
+   └─ Compare against stored 16-byte signature in LSB header
    ```
+   > **CORRECTION (/4):** Original analysis assumed AES-CBC here. **GA100 does not use AES-CBC for LS authentication.** The AES-CBC path (`acr_decrypt_ls_ucode_ga10x.c`) is GA10X+ only and is confirmed absent from GA100 production AHESASC binary. See `6-1-crypto-auth-chain-map.md` §5 and `6-2-verification-state-machine.md` §3.7.
 
 5. **WPR Allocation**:
    ```
@@ -188,16 +188,14 @@ typedef struct {
 
 ### Encryption Metadata
 
-**Encrypted Firmware**:
-- `binFlags & ENCRYPTED` indicates AES-CBC encryption
-- `aesKeyIdx` specifies which AES key to use for decryption
-- Multiple AES keys can exist (indexed by aesKeyIdx)
-- **Gap**: AES key source and derivation unknown
+**LS Authentication (GA100 actual):**
+- **CORRECTION:** GA100 does not use AES-CBC. Authentication is AES-DM + KDF (see above).
+- `aesKeyIdx` field in the LSF descriptor is not used on this path; the key is derived from SCP hardware slot 43 (a manufacturing-time secret, same value across all GA100 dies).
+- The KDF salt `g_kdfSalt = {B6 C2 31 E9 03 B2 77 D7 0E 32 A0 69 8F 4E 80 62}` is a public value embedded unencrypted in the signed AHESASC binary.
 
-**Key Storage**:
-- AES keys stored in WPR (read-protected from driver)
-- Index into key table determined by LSF descriptor
-- **Question**: Are keys hardcoded or derived per-GPU?
+**Key Storage (resolved, /4):**
+- LS authentication root key = SCP hardware slot 43, loaded via `falc_scp_secret(0x2B, SCP_R2)` (binary-confirmed: opcode `cci 0xc2b2` in AHESASC). This is a die-level secret burned at manufacturing — **not software-readable**.
+- ~~Question: Are keys hardcoded or derived per-GPU?~~ **ANSWERED:** Key is derived via KDF from SCP slot 43. The slot 43 secret is shared across all GA100 dies (not per-GPU). Compromise of one die's SCP secret enables LS signature forgery across all GA100s (W-3). See `6-1-crypto-auth-chain-map.md` §5.6.
 
 ---
 
